@@ -3,9 +3,10 @@ BLW Employee Assistant — Streamlit App
 Real India map background (36 state SVG paths) + WAP-7 electric loco + cream/green chatbot
 """
 import re
+
 import streamlit as st
 from datetime import datetime
-from data import lookup_employee
+from db_lookup import lookup_employee
 from india_map import get_india_svg
 # ── Page config ────────────────────────────────────────────────
 st.set_page_config(
@@ -82,84 +83,93 @@ def generate_response(user_input: str):
     """Returns (content: str, is_html: bool, chips: list[str])"""
     raw   = user_input.strip()
     phase = st.session_state.phase
+
+    # Step 1: Get name
     if phase == "awaiting_name":
         st.session_state.user_name = raw
-        st.session_state.phase = "awaiting_service"
+        st.session_state.phase = "awaiting_id"
         return (
             greeting() + ", **" + raw + "**! 👋\n\n"
-            "To fetch your salary slip, please enter your **Service Number** and **full name** in this format:\n\n"
-            "`Service Number, Full Name`\n\n"
-            "*Example: BLW001, Rajesh Kumar Singh*",
+            "Please enter your **Employee ID** (e.g. `RW1001`) to continue.",
             False,
-            ["BLW001, Rajesh Kumar Singh", "BLW002, Priya Sharma", "Help"],
+            ["RW1001", "RW1002", "RW1003"],
         )
-    if phase == "awaiting_service":
-        if raw.lower() == "help":
-            return (
-                "**📋 Help**\n\n"
-                "Enter your **Service Number** and **Name** separated by a comma.\n\n"
-                "`BLW001, Your Full Name`\n\n"
-                "Your Service Number is printed on your BLW Identity Card.",
-                False,
-                ["BLW001, Rajesh Kumar Singh", "BLW003, Mohan Lal Verma"],
-            )
-        ci = raw.find(",")
-        if ci != -1:
-            svc, name = raw[:ci].strip(), raw[ci + 1:].strip()
-        else:
-            m = re.match(r"^([A-Za-z]{2,4}\d{3,6})\s+(.+)$", raw, re.I)
-            if m:
-                svc, name = m.group(1).strip(), m.group(2).strip()
-            else:
-                return (
-                    "Please provide both your **Service Number** and **Name**.\n\n"
-                    "Format: `BLW001, Your Name`",
-                    False,
-                    ["BLW001, Rajesh Kumar Singh", "Help"],
-                )
-        result = lookup_employee(svc, name)
+
+    # Step 2: Get Employee ID
+    if phase == "awaiting_id":
+        emp_id = raw.strip().upper()
+        if not emp_id:
+            return ("Please enter your Employee ID (e.g. `RW1001`).", False, [])
+        st.session_state.emp_id = emp_id
+        st.session_state.phase  = "awaiting_pin"
+        return (
+            "Got it! Now please enter your **4-digit PIN**.\n\n"
+            "*(Your PIN was set when your BLW account was created)*",
+            False,
+            [],
+        )
+
+    # Step 3: Verify PIN against real database
+    if phase == "awaiting_pin":
+        pin    = raw.strip()
+        emp_id = st.session_state.get("emp_id", "")
+
+        result = lookup_employee(emp_id, pin)
+
+        if result["error"] == "locked":
+            st.session_state.phase = "done"
+            return ("🔒 Account locked after 3 failed attempts. Contact HR: **0542-2501234**.", False, [])
+
         if result["error"] == "not_found":
-            st.session_state.attempts += 1
-            if st.session_state.attempts >= 3:
-                st.session_state.phase = "done"
-                return ("🔒 Too many failed attempts. Contact HR: **0542-2501234**.", False, [])
+            st.session_state.phase = "awaiting_id"
             return (
-                "❌ Service number **" + svc.upper() + "** not found.\n\n"
-                "Please verify and try again. *(Attempt " + str(st.session_state.attempts) + "/3)*",
-                False, ["Help"],
+                "❌ Employee ID **" + emp_id + "** not found.\n\n"
+                "Please re-enter your correct Employee ID.",
+                False, []
             )
-        if result["error"] == "name_mismatch":
-            st.session_state.attempts += 1
-            if st.session_state.attempts >= 3:
+
+        if result["error"] == "wrong_pin":
+            remaining = result.get("remaining", 0)
+            if remaining == 0:
                 st.session_state.phase = "done"
-                return ("🔒 Too many failed attempts. Contact HR: **0542-2501234**.", False, [])
+                return ("🔒 Account locked. Contact HR: **0542-2501234**.", False, [])
             return (
-                "⚠️ Name doesn't match our records for this service number.\n\n"
-                "Please use your full name as per BLW records. *(Attempt " + str(st.session_state.attempts) + "/3)*",
-                False, [],
+                "⚠️ Incorrect PIN. **" + str(remaining) + " attempt(s) remaining.**\n\n"
+                "Please try again.",
+                False, []
             )
+
+        # SUCCESS
         emp = result["employee"]
         st.session_state.last_emp = emp
         st.session_state.phase    = "done"
         return (payslip_html(emp), True, ["View Salary Again", "PF Info", "Contact HR", "Start Over"])
+
+    # Post-login options
     if phase == "done":
         l = raw.lower()
+
         if any(k in l for k in ["salary", "again", "slip", "payslip"]):
             emp = st.session_state.last_emp
             if emp:
                 return (payslip_html(emp), True, ["PF Info", "Contact HR", "Start Over"])
+
         if any(k in l for k in ["pf", "provident", "fund"]):
-            return (
-                "**🏦 Provident Fund (PF) Information**\n\n"
-                "| Detail | Value |\n|---|---|\n"
-                "| Employee Contribution | 12% of Basic Pay |\n"
-                "| Employer Contribution | 12% of Basic Pay |\n"
-                "| Credited to | EPFO Account |\n\n"
-                "📞 PF Helpline: **1800-118-005** *(toll free)*\n"
-                "🌐 epfindia.gov.in",
-                False,
-                ["View Salary Again", "Contact HR", "Start Over"],
-            )
+            emp = st.session_state.last_emp
+            if emp:
+                return (
+                    "**🏦 Your Provident Fund Account**\n\n"
+                    "| Detail | Amount |\n|---|---|\n"
+                    "| Your Monthly Contribution (12%) | " + fmt(emp["pf_monthly"]) + " |\n"
+                    "| Employer Contribution (12%) | " + fmt(emp["pf_employer"]) + " |\n"
+                    "| **Total PF Balance** | **" + fmt(emp["pf_balance"]) + "** |\n"
+                    "| Last Updated | " + emp["pf_last_updated"] + " |\n\n"
+                    "📞 PF Helpline: **1800-118-005** *(toll free)*\n"
+                    "🌐 epfindia.gov.in",
+                    False,
+                    ["View Salary Again", "Contact HR", "Start Over"],
+                )
+
         if any(k in l for k in ["hr", "contact", "human resource", "personnel"]):
             return (
                 "**📞 BLW HR / Personnel Department**\n\n"
@@ -170,21 +180,24 @@ def generate_response(user_input: str):
                 False,
                 ["View Salary Again", "PF Info", "Start Over"],
             )
+
         if any(k in l for k in ["start over", "restart", "new", "reset"]):
             st.session_state.phase     = "awaiting_name"
             st.session_state.user_name = None
             st.session_state.attempts  = 0
             st.session_state.last_emp  = None
+            st.session_state.emp_id    = None
             return (
                 greeting() + " again! 🙏 Please tell me your **name** to begin.",
-                False,
-                ["Rajesh Kumar", "Priya Sharma", "Amit Pandey"],
+                False, [],
             )
+
         return (
-            "I can help you with your **salary slip**, **provident fund details**, or **HR contact information**.",
+            "I can help you with your **salary slip**, **PF balance**, or **HR contacts**.",
             False,
             ["View Salary Again", "PF Info", "Contact HR", "Start Over"],
         )
+
     return ("I didn't understand that. Please try again.", False, [])
 # ══════════════════════════════════════════════════════════════
 # CSS
